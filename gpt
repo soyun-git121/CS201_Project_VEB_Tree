@@ -1,0 +1,206 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+
+typedef struct vEBNode {
+    int u;                 // universe size
+    int min, max;          // minimum and maximum values in the tree
+    struct vEBNode* summary;
+    struct vEBNode** cluster;
+    int lower_sqrt;
+    int upper_sqrt;
+} vEBNode;
+
+// Helper: compute integer log2 (U must be power of two)
+static int log2_int(int x) {
+    return (int)round(log2(x));
+}
+
+// Create a new vEB tree of size U (must be power of two ≥2)
+// Exits on invalid U or memory allocation failure
+vEBNode* vEB_create(int U) {
+    if (U < 2) {
+        fprintf(stderr, "Error: U=%d must be ≥ 2\n", U);
+        exit(EXIT_FAILURE);
+    }
+    if ((U & (U - 1)) != 0) {
+        fprintf(stderr, "Error: U=%d must be a power of two\n", U);
+        exit(EXIT_FAILURE);
+    }
+
+    // allocate node (with explicit cast for C++)
+    vEBNode* V = (vEBNode*)malloc(sizeof(vEBNode));
+    if (!V) {
+        perror("malloc vEBNode");
+        exit(EXIT_FAILURE);
+    }
+    V->u = U;
+    V->min = V->max = -1;
+
+    if (U <= 2) {
+        V->summary = NULL;
+        V->cluster = NULL;
+        V->lower_sqrt = V->upper_sqrt = 0;
+    }
+    else {
+        int lg = log2_int(U);
+        int half = lg / 2;
+        V->lower_sqrt = 1 << half;
+        V->upper_sqrt = 1 << (lg - half);
+
+        // create summary recursively
+        V->summary = vEB_create(V->upper_sqrt);
+        if (!V->summary) {
+            fprintf(stderr, "Failed to create summary (U=%d)\n", V->upper_sqrt);
+            exit(EXIT_FAILURE);
+        }
+
+        // allocate cluster pointer array (explicit cast for C++)
+        V->cluster = (vEBNode**)calloc(V->upper_sqrt, sizeof(vEBNode*));
+        if (!V->cluster) {
+            perror("calloc cluster array");
+            exit(EXIT_FAILURE);
+        }
+
+        // eager-init each cluster
+        for (int i = 0; i < V->upper_sqrt; i++) {
+            V->cluster[i] = vEB_create(V->lower_sqrt);
+            if (!V->cluster[i]) {
+                fprintf(stderr, "Failed to create cluster[%d] (U=%d)\n", i, V->lower_sqrt);
+                exit(EXIT_FAILURE);
+            }
+        }
+    }
+    return V;
+}
+
+// Helpers to split/join keys
+static int high(vEBNode* V, int x) { return x / V->lower_sqrt; }
+static int low(vEBNode* V, int x) { return x % V->lower_sqrt; }
+static int idx(vEBNode* V, int h, int l) { return h * V->lower_sqrt + l; }
+
+// Insert into empty tree
+void vEB_empty_insert(vEBNode* V, int x) {
+    V->min = V->max = x;
+}
+
+// MEMBER (find)
+int vEB_member(vEBNode* V, int x) {
+    if (!V) return 0;
+    if (x == V->min || x == V->max) return 1;
+    if (V->u <= 2) return 0;
+    return vEB_member(V->cluster[high(V, x)], low(V, x));
+}
+
+// INSERT
+void vEB_insert(vEBNode* V, int x) {
+    if (V->min == -1) {
+        vEB_empty_insert(V, x);
+        return;
+    }
+    if (x < V->min) {
+        int tmp = x; x = V->min; V->min = tmp;
+    }
+    if (V->u > 2) {
+        int h = high(V, x), l = low(V, x);
+        if (V->cluster[h]->min == -1) {
+            vEB_insert(V->summary, h);
+            vEB_empty_insert(V->cluster[h], l);
+        }
+        else {
+            vEB_insert(V->cluster[h], l);
+        }
+    }
+    if (x > V->max) V->max = x;
+}
+
+// SUCCESSOR / PREDECESSOR helpers
+static int vEB_min(vEBNode* V) { return V->min; }
+static int vEB_max(vEBNode* V) { return V->max; }
+
+// SUCCESSOR
+int vEB_successor(vEBNode* V, int x) {
+    if (V->u <= 2) {
+        if (x == 0 && V->max == 1) return 1;
+        return -1;
+    }
+    if (V->min != -1 && x < V->min) return V->min;
+    int h = high(V, x), l = low(V, x);
+    int max_low = vEB_max(V->cluster[h]);
+    if (max_low != -1 && l < max_low) {
+        int off = vEB_successor(V->cluster[h], l);
+        return idx(V, h, off);
+    }
+    int succ_c = vEB_successor(V->summary, h);
+    if (succ_c == -1) return -1;
+    int off = vEB_min(V->cluster[succ_c]);
+    return idx(V, succ_c, off);
+}
+
+// PREDECESSOR
+int vEB_predecessor(vEBNode* V, int x) {
+    if (V->u <= 2) {
+        if (x == 1 && V->min == 0) return 0;
+        return -1;
+    }
+    if (V->max != -1 && x > V->max) return V->max;
+    int h = high(V, x), l = low(V, x);
+    int min_low = vEB_min(V->cluster[h]);
+    if (min_low != -1 && l > min_low) {
+        int off = vEB_predecessor(V->cluster[h], l);
+        return idx(V, h, off);
+    }
+    int pred_c = vEB_predecessor(V->summary, h);
+    if (pred_c == -1) {
+        if (V->min != -1 && x > V->min) return V->min;
+        return -1;
+    }
+    int off = vEB_max(V->cluster[pred_c]);
+    return idx(V, pred_c, off);
+}
+
+// DELETE
+void vEB_delete(vEBNode* V, int x) {
+    if (V->min == V->max) {
+        V->min = V->max = -1;
+        return;
+    }
+    if (V->u == 2) {
+        V->min = V->max = (x == 0) ? 1 : 0;
+        return;
+    }
+    if (x == V->min) {
+        int first = vEB_min(V->summary);
+        int off = vEB_min(V->cluster[first]);
+        x = idx(V, first, off);
+        V->min = x;
+    }
+    int h = high(V, x), l = low(V, x);
+    vEB_delete(V->cluster[h], l);
+    if (vEB_min(V->cluster[h]) == -1) {
+        vEB_delete(V->summary, h);
+        if (x == V->max) {
+            int smax = vEB_max(V->summary);
+            V->max = (smax == -1) ? V->min : idx(V, smax, vEB_max(V->cluster[smax]));
+        }
+    }
+    else if (x == V->max) {
+        V->max = idx(V, h, vEB_max(V->cluster[h]));
+    }
+}
+
+// Example usage
+int main() {
+    int U = 16;
+    vEBNode* tree = vEB_create(U);
+    vEB_insert(tree, 2);
+    vEB_insert(tree, 5);
+    vEB_insert(tree, 9);
+    vEB_insert(tree, 14);
+    printf("Member 5? %d\n", vEB_member(tree, 5));
+    printf("Successor of 5: %d\n", vEB_successor(tree, 5));
+    printf("Predecessor of 9: %d\n", vEB_predecessor(tree, 9));
+    vEB_delete(tree, 5);
+    printf("Member 5 after delete? %d\n", vEB_member(tree, 5));
+    return 0;
+}
